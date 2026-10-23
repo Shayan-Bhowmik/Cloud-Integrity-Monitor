@@ -1,6 +1,7 @@
 import uuid
-from typing import Annotated, List
+from typing import Annotated, List, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+from pydantic import BaseModel
 
 from app.auth import get_current_user_id
 from app.config import get_settings
@@ -10,6 +11,10 @@ from app.schemas import FileItemResponse, FilesListResponse, VersionResponse
 from app.storage import download_file_bytes, upload_file_bytes
 
 router = APIRouter(prefix="/api", tags=["files"])
+
+
+class RestoreRequest(BaseModel):
+    version_id: Optional[str] = None
 
 
 @router.post("/files", response_model=VersionResponse, status_code=status.HTTP_201_CREATED)
@@ -40,7 +45,6 @@ async def upload_file(
 
     client = get_supabase_client()
 
-    # 1. Check if file with same name already exists for this user
     file_record = (
         client.table("files")
         .select("*")
@@ -52,7 +56,6 @@ async def upload_file(
 
     if file_record and file_record.data:
         file_id = file_record.data["id"]
-        # Determine next version number
         versions_res = (
             client.table("versions")
             .select("version_no")
@@ -63,7 +66,6 @@ async def upload_file(
         )
         version_no = (versions_res.data[0]["version_no"] + 1) if versions_res.data else 1
     else:
-        # Create new file record
         file_id = str(uuid.uuid4())
         client.table("files").insert({
             "id": file_id,
@@ -73,7 +75,6 @@ async def upload_file(
         }).execute()
         version_no = 1
 
-    # 2. Compute hash and path
     version_id = str(uuid.uuid4())
     sha256_hash = calculate_sha256(content)
     storage_path = f"{user_id}/{file_id}/v{version_no}"
@@ -88,16 +89,14 @@ async def upload_file(
         storage_path=storage_path,
     )
 
-    # 3. Upload to Supabase Storage
     try:
         upload_file_bytes(storage_path, content, content_type=file.content_type or "application/octet-stream")
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error_code": "STORAGE_ERROR", "message": "Failed to store file in cloud storage"},
         )
 
-    # 4. Insert version row
     version_data = {
         "id": version_id,
         "file_id": file_id,
@@ -110,7 +109,6 @@ async def upload_file(
         "status": "ok",
     }
     insert_res = client.table("versions").insert(version_data).execute()
-
     return insert_res.data[0]
 
 
@@ -146,7 +144,6 @@ def list_files(user_id: str = Depends(get_current_user_id)):
 @router.get("/files/{file_id}/versions", response_model=List[VersionResponse])
 def get_file_versions(file_id: str, user_id: str = Depends(get_current_user_id)):
     client = get_supabase_client()
-    # Confirm file ownership
     file_res = client.table("files").select("id").eq("id", file_id).eq("user_id", user_id).maybe_single().execute()
     if not file_res or not file_res.data:
         raise HTTPException(
@@ -195,7 +192,6 @@ def download_version(version_id: str, user_id: str = Depends(get_current_user_id
             detail={"error_code": "FILE_NOT_FOUND_IN_STORAGE", "message": "Object not found in cloud storage"},
         )
 
-    # Integrity check before serving download
     actual_hash = calculate_sha256(content)
     if actual_hash != expected_hash:
         raise HTTPException(
@@ -211,3 +207,127 @@ def download_version(version_id: str, user_id: str = Depends(get_current_user_id
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
     )
+
+
+@router.post("/files/{file_id}/restore", response_model=VersionResponse, status_code=status.HTTP_201_CREATED)
+def restore_file(
+    file_id: str,
+    payload: Optional[RestoreRequest] = None,
+    user_id: str = Depends(get_current_user_id),
+):
+    settings = get_settings()
+    client = get_supabase_client()
+
+    # Confirm file exists and belongs to user
+    file_res = client.table("files").select("*").eq("id", file_id).eq("user_id", user_id).maybe_single().execute()
+    if not file_res or not file_res.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "FILE_NOT_FOUND", "message": "File not found"},
+        )
+
+    # Find the target version to restore from
+    if payload and payload.version_id:
+        target_res = (
+            client.table("versions")
+            .select("*")
+            .eq("id", payload.version_id)
+            .eq("file_id", file_id)
+            .eq("user_id", user_id)
+            .maybe_single()
+            .execute()
+        )
+        if not target_res or not target_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error_code": "VERSION_NOT_FOUND", "message": "Specified version not found for this file"},
+            )
+        target_version = target_res.data
+    else:
+        # Default: newest version with status 'ok'
+        target_res = (
+            client.table("versions")
+            .select("*")
+            .eq("file_id", file_id)
+            .eq("user_id", user_id)
+            .eq("status", "ok")
+            .order("version_no", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not target_res or not target_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error_code": "NO_SAFE_VERSION", "message": "No clean 'ok' version found to restore from"},
+            )
+        target_version = target_res.data[0]
+
+    # Download source bytes and verify hash
+    try:
+        source_bytes = download_file_bytes(target_version["storage_path"])
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "SOURCE_FILE_MISSING", "message": "Source version file is missing from storage"},
+        )
+
+    source_hash = calculate_sha256(source_bytes)
+    if source_hash != target_version["sha256"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "SOURCE_VERSION_COMPROMISED",
+                "message": "Cannot restore from a corrupted source version.",
+            },
+        )
+
+    # Determine next version number
+    latest_v_res = (
+        client.table("versions")
+        .select("version_no")
+        .eq("file_id", file_id)
+        .order("version_no", desc=True)
+        .limit(1)
+        .execute()
+    )
+    new_version_no = (latest_v_res.data[0]["version_no"] + 1) if latest_v_res.data else 1
+
+    new_version_id = str(uuid.uuid4())
+    new_storage_path = f"{user_id}/{file_id}/v{new_version_no}"
+    size = len(source_bytes)
+
+    # Compute new signature
+    signature = compute_signature(
+        secret=settings.SIGNING_SECRET,
+        version_id=new_version_id,
+        file_id=file_id,
+        user_id=user_id,
+        version_no=new_version_no,
+        sha256_hash=source_hash,
+        size=size,
+        storage_path=new_storage_path,
+    )
+
+    # Upload copy to storage at new path
+    try:
+        upload_file_bytes(new_storage_path, source_bytes)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "STORAGE_ERROR", "message": "Failed to store restored version"},
+        )
+
+    # Insert clean new version row
+    new_version_data = {
+        "id": new_version_id,
+        "file_id": file_id,
+        "user_id": user_id,
+        "version_no": new_version_no,
+        "storage_path": new_storage_path,
+        "size": size,
+        "sha256": source_hash,
+        "signature": signature,
+        "status": "ok",
+    }
+    insert_res = client.table("versions").insert(new_version_data).execute()
+    return insert_res.data[0]
