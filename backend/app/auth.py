@@ -1,7 +1,34 @@
+from functools import lru_cache
 from typing import Annotated
 import jwt
 from fastapi import Depends, Header, HTTPException, status
 from app.config import get_settings
+
+# Supabase projects sign user tokens either with the legacy shared secret (HS256)
+# or with asymmetric signing keys published at the project's JWKS endpoint.
+ASYMMETRIC_ALGORITHMS = {"ES256", "RS256"}
+
+
+@lru_cache()
+def get_jwks_client() -> jwt.PyJWKClient:
+    settings = get_settings()
+    jwks_url = f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1/.well-known/jwks.json"
+    return jwt.PyJWKClient(jwks_url, cache_keys=True)
+
+
+def decode_token(token: str) -> dict:
+    settings = get_settings()
+    algorithm = jwt.get_unverified_header(token).get("alg")
+
+    if algorithm == "HS256":
+        key = settings.SUPABASE_JWT_SECRET
+    elif algorithm in ASYMMETRIC_ALGORITHMS:
+        key = get_jwks_client().get_signing_key_from_jwt(token).key
+    else:
+        raise jwt.InvalidAlgorithmError(f"Unsupported token algorithm: {algorithm}")
+
+    # The accepted algorithm list is pinned per branch so a token cannot pick a different key type.
+    return jwt.decode(token, key, algorithms=[algorithm], options={"verify_aud": False})
 
 
 def get_current_user_id(
@@ -21,16 +48,9 @@ def get_current_user_id(
         )
 
     token = parts[1]
-    settings = get_settings()
 
     try:
-        # Supabase JWTs are signed with HMAC-SHA256 using SUPABASE_JWT_SECRET
-        payload = jwt.decode(
-            token,
-            settings.SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
-            options={"verify_aud": False},
-        )
+        payload = decode_token(token)
         user_id = payload.get("sub")
         if not user_id:
             raise HTTPException(

@@ -1,0 +1,39 @@
+name: cairn
+
+# Usage: copy .env.example to .env, fill in values, then `docker compose up --build`.
+#   Web: http://localhost:3000   (nginx; proxies /api and /health to the api service)
+#   API: http://localhost:8000   (FastAPI)
+
+services:
+  api:
+    build:
+      context: ./backend
+    env_file: .env
+    environment:
+      # The browser only calls the API through the web container's proxy (same origin),
+      # but allow the direct origins too for tools and the Vite dev server.
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        # Public values only (Supabase URL + anon key). Empty API URL = same-origin via nginx.
+        VITE_API_URL: ""
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL:?Set VITE_SUPABASE_URL in .env}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY:?Set VITE_SUPABASE_ANON_KEY in .env}
+    ports:
+      - "3000:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

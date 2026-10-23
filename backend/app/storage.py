@@ -1,3 +1,5 @@
+import uuid
+
 from app.db import get_supabase_client
 
 BUCKET_NAME = "backups"
@@ -14,7 +16,9 @@ def upload_file_bytes(storage_path: str, file_bytes: bytes, content_type: str = 
 
 def download_file_bytes(storage_path: str) -> bytes:
     client = get_supabase_client()
-    return client.storage.from_(BUCKET_NAME).download(storage_path)
+    # Supabase Storage can serve a cached copy for up to a minute after an object is overwritten.
+    # A unique query parameter forces a fresh read, so integrity checks see the current bytes.
+    return client.storage.from_(BUCKET_NAME).download(storage_path, query_params={"nocache": uuid.uuid4().hex})
 
 
 def delete_file_object(storage_path: str) -> None:

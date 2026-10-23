@@ -12,12 +12,29 @@ from app.storage import delete_file_object, download_file_bytes, upload_file_byt
 
 router = APIRouter(prefix="/api/demo", tags=["demo"])
 
+# Each demo file gets two clean versions. Attacks hit the newest version, so the older one
+# stays a valid restore source and the seed -> attack -> verify -> restore flow can complete.
 DEMO_FILES_DATA = [
-    ("financial_report_q3.csv", b"Quarter,Revenue,Expenses,Profit\nQ1,12000,8000,4000\nQ2,15000,9000,6000\nQ3,18000,9500,8500\n"),
-    ("patient_records_anonymized.json", b'{"patients": [{"id": 101, "status": "stable"}, {"id": 102, "status": "critical"}]}'),
-    ("production_database_backup.sql", b"-- Production Backup\nCREATE TABLE users(id INT, email TEXT);\nINSERT INTO users VALUES (1, 'alice@example.com');\n"),
-    ("system_auth_keys.pem", b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Y34...[MOCK DEMO KEY CERT]...=\n-----END RSA PRIVATE KEY-----\n"),
-    ("client_contracts_2026.pdf", b"%PDF-1.4 Mock Cairn Encrypted Demo Document Structure for Verification testing %EOF"),
+    ("financial_report_q3.csv", [
+        b"Quarter,Revenue,Expenses,Profit\nQ1,12000,8000,4000\nQ2,15000,9000,6000\n",
+        b"Quarter,Revenue,Expenses,Profit\nQ1,12000,8000,4000\nQ2,15000,9000,6000\nQ3,18000,9500,8500\n",
+    ]),
+    ("patient_records_anonymized.json", [
+        b'{"patients": [{"id": 101, "status": "stable"}]}',
+        b'{"patients": [{"id": 101, "status": "stable"}, {"id": 102, "status": "critical"}]}',
+    ]),
+    ("production_database_backup.sql", [
+        b"-- Production Backup\nCREATE TABLE users(id INT, email TEXT);\n",
+        b"-- Production Backup\nCREATE TABLE users(id INT, email TEXT);\nINSERT INTO users VALUES (1, 'alice@example.com');\n",
+    ]),
+    ("system_auth_keys.pem", [
+        b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Y34...[MOCK DEMO KEY V1]...=\n-----END RSA PRIVATE KEY-----\n",
+        b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Y34...[MOCK DEMO KEY CERT]...=\n-----END RSA PRIVATE KEY-----\n",
+    ]),
+    ("client_contracts_2026.pdf", [
+        b"%PDF-1.4 Mock Cairn Demo Document Draft %EOF",
+        b"%PDF-1.4 Mock Cairn Encrypted Demo Document Structure for Verification testing %EOF",
+    ]),
 ]
 
 
@@ -33,7 +50,7 @@ def seed_demo_files(user_id: str = Depends(get_current_user_id)):
 
     created_files = []
 
-    for name, content in DEMO_FILES_DATA:
+    for name, contents in DEMO_FILES_DATA:
         # Check if demo file already exists for this user to avoid duplicates
         existing = (
             client.table("files")
@@ -48,22 +65,6 @@ def seed_demo_files(user_id: str = Depends(get_current_user_id)):
             continue
 
         file_id = str(uuid.uuid4())
-        version_id = str(uuid.uuid4())
-        version_no = 1
-        storage_path = f"{user_id}/{file_id}/v{version_no}"
-        sha256_hash = calculate_sha256(content)
-        size = len(content)
-
-        signature = compute_signature(
-            secret=settings.SIGNING_SECRET,
-            version_id=version_id,
-            file_id=file_id,
-            user_id=user_id,
-            version_no=version_no,
-            sha256_hash=sha256_hash,
-            size=size,
-            storage_path=storage_path,
-        )
 
         # 1. Create file record
         client.table("files").insert({
@@ -73,21 +74,38 @@ def seed_demo_files(user_id: str = Depends(get_current_user_id)):
             "is_demo": True,
         }).execute()
 
-        # 2. Upload file bytes
-        upload_file_bytes(storage_path, content)
+        for version_no, content in enumerate(contents, start=1):
+            version_id = str(uuid.uuid4())
+            storage_path = f"{user_id}/{file_id}/v{version_no}"
+            sha256_hash = calculate_sha256(content)
+            size = len(content)
 
-        # 3. Create version record
-        client.table("versions").insert({
-            "id": version_id,
-            "file_id": file_id,
-            "user_id": user_id,
-            "version_no": version_no,
-            "storage_path": storage_path,
-            "size": size,
-            "sha256": sha256_hash,
-            "signature": signature,
-            "status": "ok",
-        }).execute()
+            signature = compute_signature(
+                secret=settings.SIGNING_SECRET,
+                version_id=version_id,
+                file_id=file_id,
+                user_id=user_id,
+                version_no=version_no,
+                sha256_hash=sha256_hash,
+                size=size,
+                storage_path=storage_path,
+            )
+
+            # 2. Upload file bytes
+            upload_file_bytes(storage_path, content)
+
+            # 3. Create version record
+            client.table("versions").insert({
+                "id": version_id,
+                "file_id": file_id,
+                "user_id": user_id,
+                "version_no": version_no,
+                "storage_path": storage_path,
+                "size": size,
+                "sha256": sha256_hash,
+                "signature": signature,
+                "status": "ok",
+            }).execute()
 
         created_files.append({"id": file_id, "name": name, "version_id": version_id})
 
