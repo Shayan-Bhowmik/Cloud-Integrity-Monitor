@@ -6,6 +6,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import get_settings
 from app.auth import get_current_user_id
+from app.routes import files
 
 settings = get_settings()
 
@@ -48,7 +49,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    # Never leak stack traces to the client
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"error_code": "INTERNAL_SERVER_ERROR", "message": "An unexpected server error occurred."},
@@ -61,7 +61,11 @@ def health_check():
     return {"status": "ok"}
 
 
-# 4. Protected Test Route (Used to verify Ticket 2)
+# 4. Protected Test Route
 @app.get("/api/auth-test", status_code=status.HTTP_200_OK)
 def auth_test(user_id: str = Depends(get_current_user_id)):
     return {"user_id": user_id}
+
+
+# 5. Include Routers
+app.include_router(files.router)

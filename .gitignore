@@ -54,3 +54,6 @@ dist-ssr/
 *~
 .DS_Store
 Thumbs.db
+
+backend/test.txt
+backend/big.dat
