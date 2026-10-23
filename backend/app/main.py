@@ -6,7 +6,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import get_settings
 from app.auth import get_current_user_id
-from app.routes import files, verify, alerts
+from app.routes import files, verify, alerts, demo
 
 settings = get_settings()
 
@@ -71,3 +71,4 @@ def auth_test(user_id: str = Depends(get_current_user_id)):
 app.include_router(files.router)
 app.include_router(verify.router)
 app.include_router(alerts.router)
+app.include_router(demo.router)

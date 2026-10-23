@@ -17,10 +17,14 @@ def download_file_bytes(storage_path: str) -> bytes:
     return client.storage.from_(BUCKET_NAME).download(storage_path)
 
 
+def delete_file_object(storage_path: str) -> None:
+    client = get_supabase_client()
+    client.storage.from_(BUCKET_NAME).remove([storage_path])
+
+
 def file_exists(storage_path: str) -> bool:
     client = get_supabase_client()
     try:
-        # Split folder and filename to check existence via list()
         parts = storage_path.rsplit("/", 1)
         folder = parts[0] if len(parts) > 1 else ""
         filename = parts[-1]
