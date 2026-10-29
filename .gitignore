@@ -32,6 +32,10 @@ wheels/
 *.egg
 .pytest_cache/
 
+# Frontend source directory (overrides the generic Python lib/ rule)
+!frontend/src/lib/
+!frontend/src/lib/**
+
 # Node
 node_modules/
 npm-debug.log*
